@@ -168,7 +168,7 @@ module.exports = class Binance {
   async cancelOrder(id) {
     const order = await this.findOrderById(id);
     if (!order) {
-      return;
+      return undefined;
     }
 
     try {
@@ -177,8 +177,18 @@ module.exports = class Binance {
         orderId: id
       });
     } catch (e) {
-      this.logger.error(`Binance: cancel order error: ${e}`);
-      return;
+      const message = String(e).toLowerCase();
+
+      // "Error: Unknown order sent."
+      if (message.includes('unknown order sent')) {
+        this.logger.info(`Binance: cancel order not found remove it: ${JSON.stringify([e, id])}`);
+        this.orderbag.delete(id);
+        return ExchangeOrder.createCanceled(order);
+      }
+
+      this.logger.error(`Binance: cancel order error: ${JSON.stringify([e, id])}`);
+
+      return undefined;
     }
 
     this.orderbag.delete(id);
@@ -237,7 +247,17 @@ module.exports = class Binance {
       let retry = false;
 
       let status;
-      const orderStatus = order.status.toLowerCase().replace('_', '');
+
+      let sourceStatus;
+      if (order.status) {
+        sourceStatus = order.status; // REST
+      } else if (order.orderStatus) {
+        sourceStatus = order.orderStatus; // websocket
+      } else {
+        throw new Error(`Invalid order status: ${JSON.stringify(order)}`);
+      }
+
+      const orderStatus = sourceStatus.toLowerCase().replace('_', '');
 
       // https://github.com/binance-exchange/binance-official-api-docs/blob/master/rest-api.md#enum-definitions
       if (['new', 'partiallyfilled', 'pendingnew'].includes(orderStatus)) {
@@ -254,7 +274,16 @@ module.exports = class Binance {
         retry = true;
       }
 
-      const ordType = order.type.toLowerCase().replace(/[\W_]+/g, '');
+      let sourceOrderStatus;
+      if (order.type) {
+        sourceOrderStatus = order.type; // REST
+      } else if (order.orderType) {
+        sourceOrderStatus = order.orderType; // websocket
+      } else {
+        throw new Error(`Invalid order type: ${JSON.stringify(order)}`);
+      }
+
+      const ordType = sourceOrderStatus.toLowerCase().replace(/[\W_]+/g, '');
 
       // secure the value
       let orderType;
@@ -276,17 +305,62 @@ module.exports = class Binance {
           break;
       }
 
+      let amount;
+      if (order.origQty) {
+        amount = order.origQty; // REST
+      } else if (order.quantity) {
+        amount = order.quantity; // websocket
+      } else {
+        throw new Error(`Invalid order amount: ${JSON.stringify(order)}`);
+      }
+
+      if (order.totalTradeQuantity) {
+        // websocket
+        const totalTradeQuantity = parseFloat(order.totalTradeQuantity);
+        if (totalTradeQuantity > 0) {
+          amount -= totalTradeQuantity;
+        }
+      } else if (order.cummulativeQuoteQty) {
+        // REST
+        const cummulativeQuoteQty = parseFloat(order.cummulativeQuoteQty);
+        if (cummulativeQuoteQty > 0) {
+          amount -= cummulativeQuoteQty;
+        }
+      }
+
+      let clientOrderId;
+      if (order.clientOrderId) {
+        clientOrderId = order.clientOrderId; // REST
+      } else if (order.newClientOrderId) {
+        clientOrderId = order.newClientOrderId; // websocket
+      }
+
+      let createdAt;
+      if (order.transactTime) {
+        createdAt = order.transactTime; // REST
+      } else if (order.time) {
+        createdAt = order.time; // REST
+      } else if (order.creationTime) {
+        createdAt = order.creationTime; // websocket
+      }
+
+      // secure the value
+      const side = order.side.toLowerCase();
+      if (!['buy', 'sell'].includes(side)) {
+        throw new Error(`Invalid order side: ${JSON.stringify(order)}`);
+      }
+
       return new ExchangeOrder(
         order.orderId,
         order.symbol,
         status,
         parseFloat(order.price),
-        parseFloat(order.origQty),
+        parseFloat(amount),
         retry,
-        order.clientOrderId,
-        order.side.toLowerCase() === 'buy' ? 'buy' : 'sell', // secure the value,
+        clientOrderId,
+        side,
         orderType,
-        new Date(order.transactTime ? order.transactTime : order.time),
+        createdAt ? new Date(createdAt) : undefined,
         new Date(),
         order
       );
@@ -431,18 +505,18 @@ module.exports = class Binance {
 
   async updateOrder(id, order) {
     if (!order.amount && !order.price) {
-      throw 'Invalid amount / price for update';
+      throw new Error('Invalid amount / price for update');
     }
 
     const currentOrder = await this.findOrderById(id);
     if (!currentOrder) {
-      return;
+      return undefined;
     }
 
     // cancel order; mostly it can already be canceled
     await this.cancelOrder(id);
 
-    return await this.order(Order.createUpdateOrderOnCurrent(currentOrder, order.price, order.amount));
+    return this.order(Order.createUpdateOrderOnCurrent(currentOrder, order.price, order.amount));
   }
 
   getName() {
@@ -455,11 +529,11 @@ module.exports = class Binance {
 
       // clean orders with state is switching from open to close
       const orderStatus = event.orderStatus.toLowerCase();
-      if (
-        ['canceled', 'filled', 'rejected'].includes(orderStatus) &&
-        event.orderId &&
-        this.orderbag.get(event.orderId)
-      ) {
+      const isRemoveEvent =
+        ['canceled', 'filled', 'rejected'].includes(orderStatus) && event.orderId && this.orderbag.get(event.orderId);
+
+      if (isRemoveEvent) {
+        this.logger.info(`Binance: Removing non open order: ${orderStatus} - ${JSON.stringify(event)}`);
         this.orderbag.delete(event.orderId);
       }
 
@@ -472,6 +546,11 @@ module.exports = class Binance {
         this.syncTradesForEntries([event.symbol]),
         300
       );
+
+      if ('orderId' in event) {
+        const exchangeOrder = Binance.createOrders(event)[0];
+        this.orderbag.triggerOrder(exchangeOrder);
+      }
     }
 
     // get balances and same them internally; allows to take open positions

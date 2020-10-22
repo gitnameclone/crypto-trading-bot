@@ -176,6 +176,7 @@ module.exports = class BinanceMargin {
     } catch (e) {
       this.logger.error(`Binance Margin: order create error: ${JSON.stringify([e.code, e.message, order, payload])}`);
 
+      // @TODO: retry possible: [-3007,"You have pending transcation, please try again later." // typo "transcation" externally ;)
       // -2010: insufficient balance
       // -XXXX: borrow amount has exceed
       if (
@@ -207,7 +208,17 @@ module.exports = class BinanceMargin {
         orderId: id
       });
     } catch (e) {
-      this.logger.error(`Binance Margin: cancel order error: ${e}`);
+      const message = String(e).toLowerCase();
+
+      // "Error: Unknown order sent."
+      if (message.includes('unknown order sent')) {
+        this.logger.info(`Binance Margin: cancel order not found remove it: ${JSON.stringify([e, id])}`);
+        this.orderbag.delete(id);
+        return ExchangeOrder.createCanceled(order);
+      }
+
+      this.logger.error(`Binance Margin: cancel order error: ${JSON.stringify([e, id])}`);
+
       return undefined;
     }
 
@@ -369,6 +380,7 @@ module.exports = class BinanceMargin {
 
     const currentOrder = await this.findOrderById(id);
     if (!currentOrder) {
+      this.logger.debug(`Binance Margin: Order to update not found: ${JSON.stringify([id, order])}`);
       return undefined;
     }
 
@@ -388,11 +400,11 @@ module.exports = class BinanceMargin {
 
       // clean orders with state is switching from open to close
       const orderStatus = event.orderStatus.toLowerCase();
-      if (
-        ['canceled', 'filled', 'rejected'].includes(orderStatus) &&
-        event.orderId &&
-        this.orderbag.get(event.orderId)
-      ) {
+      const isRemoveEvent =
+        ['canceled', 'filled', 'rejected'].includes(orderStatus) && event.orderId && this.orderbag.get(event.orderId);
+
+      if (isRemoveEvent) {
+        this.logger.info(`Binance Margin: Removing non open order: ${orderStatus} - ${JSON.stringify(event)}`);
         this.orderbag.delete(event.orderId);
       }
 
@@ -405,6 +417,11 @@ module.exports = class BinanceMargin {
         this.syncTradesForEntries([event.symbol]),
         300
       );
+
+      if ('orderId' in event && !isRemoveEvent) {
+        const exchangeOrder = Binance.createOrders(event)[0];
+        this.orderbag.triggerOrder(exchangeOrder);
+      }
     }
 
     // get balances and same them internally; allows to take open positions

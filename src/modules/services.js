@@ -626,7 +626,8 @@ module.exports = {
         this.getCandlestickResample(),
         this.getLogger(),
         this.getQueue(),
-        this.getCandleImporter()
+        this.getCandleImporter(),
+        this.getThrottler()
       ),
       new FTX(
         this.getEventEmitter(),
@@ -643,7 +644,7 @@ module.exports = {
         this.getLogger(),
         this.getQueue(),
         this.getCandleImporter(),
-        this.getThrottler(),
+        this.getThrottler()
       ),
       new BinanceMargin(
         this.getEventEmitter(),
