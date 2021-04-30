@@ -221,7 +221,9 @@ module.exports = {
       this.getExchangeManager(),
       this.getPairStateManager(),
       this.getLogger(),
-      this.getSystemUtil()
+      this.getSystemUtil(),
+      this.getOrderExecutor(),
+      this.getOrderCalculator()
     ));
   },
 
@@ -370,6 +372,7 @@ module.exports = {
       this.getCandleExportHttp(),
       this.getCandleImporter(),
       this.getOrdersHttp(),
+      this.getTickers(),
       parameters.projectDir
     );
   },
@@ -539,7 +542,7 @@ module.exports = {
       return candleExportHttp;
     }
 
-    return (candleExportHttp = new CandleExportHttp(this.getCandlestickRepository()));
+    return (candleExportHttp = new CandleExportHttp(this.getCandlestickRepository(), this.getPairConfig()));
   },
 
   getOrdersHttp: function() {
@@ -551,7 +554,8 @@ module.exports = {
       this.getBacktest(),
       this.getTickers(),
       this.getOrderExecutor(),
-      this.getExchangeManager()
+      this.getExchangeManager(),
+      this.getPairConfig()
     ));
   },
 
